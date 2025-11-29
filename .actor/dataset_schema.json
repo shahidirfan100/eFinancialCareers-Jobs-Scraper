@@ -6,10 +6,12 @@
       "title": "Overview",
       "transformation": {
         "fields": [
+          "job_id",
           "title",
           "company",
           "location",
-          "category",
+          "job_type",
+          "salary",
           "date_posted",
           "url"
         ]
@@ -17,6 +19,10 @@
       "display": {
         "component": "table",
         "properties": {
+          "job_id": {
+            "label": "Job ID",
+            "format": "text"
+          },
           "title": {
             "label": "Job Title",
             "format": "text"
@@ -29,8 +35,12 @@
             "label": "Location",
             "format": "text"
           },
-          "category": {
-            "label": "Category",
+          "job_type": {
+            "label": "Job Type",
+            "format": "text"
+          },
+          "salary": {
+            "label": "Salary",
             "format": "text"
           },
           "date_posted": {

@@ -24,8 +24,24 @@ async function main() {
         const cleanText = (html) => {
             if (!html) return '';
             const $ = cheerioLoad(html);
-            $('script, style, noscript, iframe').remove();
+            $('script, style, noscript, iframe, svg, path, img').remove();
             return $.root().text().replace(/\s+/g, ' ').trim();
+        };
+
+        const cleanDescriptionHtml = (html) => {
+            if (!html) return null;
+            const $ = cheerioLoad(`<div>${html}</div>`);
+            // Remove unwanted elements
+            $('script, style, noscript, iframe, svg, img, button, form, input, select, textarea, nav, header, footer, aside').remove();
+            // Remove class and style attributes but keep text-formatting tags
+            $('*').each((_, el) => {
+                $(el).removeAttr('class').removeAttr('style').removeAttr('id').removeAttr('data-*');
+            });
+            // Get cleaned HTML
+            let cleaned = $.html();
+            // Remove the wrapper div we added
+            cleaned = cleaned.replace(/^<div>|<\/div>$/g, '');
+            return cleaned.trim() || null;
         };
 
         const buildStartUrl = (kw, loc, cat) => {
@@ -175,7 +191,6 @@ async function main() {
                         let description_html = null;
                         
                         // Try to find description by looking for large text blocks
-                        const bodyText = $('body').text();
                         const possibleDescriptions = [];
                         
                         $('div, section, article').each((_, el) => {
@@ -195,32 +210,66 @@ async function main() {
                         if (possibleDescriptions.length > 0) {
                             // Get the longest description
                             possibleDescriptions.sort((a, b) => b.score - a.score);
-                            description_html = possibleDescriptions[0].html;
+                            description_html = cleanDescriptionHtml(possibleDescriptions[0].html);
                         }
                         
                         data.description_html = description_html;
                         data.description_text = description_html ? cleanText(description_html) : null;
                         
-                        // Extract date posted
+                        // Extract date posted, job type, salary, and job ID
                         let date_posted = null;
+                        let job_type = null;
+                        let salary = null;
+                        let job_id = null;
+                        
+                        // Extract job ID from URL
+                        const urlMatch = request.url.match(/\.id(\d+)/);
+                        if (urlMatch) {
+                            job_id = urlMatch[1];
+                        }
+                        
+                        // Look for date posted
                         $('*').each((_, el) => {
-                            const text = $(el).text();
-                            if (text.includes('Posted') || text.includes('ago') || text.includes('days')) {
-                                const match = text.match(/Posted\s+(.+?)(?:\s|$)/i) || 
-                                             text.match(/(\d+\s+(?:hour|day|week|month)s?\s+ago)/i);
+                            const text = $(el).text().trim();
+                            
+                            // Check for date patterns
+                            if (!date_posted && (text.includes('Posted') || text.includes('ago'))) {
+                                const match = text.match(/Posted\s+(.+?)(?:ago|$)/i) || 
+                                             text.match(/(\d+\s+(?:hour|day|week|month)s?\s+ago)/i) ||
+                                             text.match(/Posted\s+(\d+\s+(?:hour|day|week|month)s?)/i);
                                 if (match) {
                                     date_posted = match[1].trim();
-                                    return false; // break
+                                    if (!date_posted.includes('ago')) date_posted += ' ago';
+                                }
+                            }
+                            
+                            // Check for job type (Permanent, Contract, Full time, Part time, etc.)
+                            if (!job_type && text.match(/^(Permanent|Contract|Full time|Part time|Temporary|Freelance|Internship)$/i)) {
+                                job_type = text;
+                            }
+                            
+                            // Check for salary patterns
+                            if (!salary && text.match(/\$[\d,]+|£[\d,]+|€[\d,]+|Competitive/i)) {
+                                const salaryMatch = text.match(/([\$£€][\d,]+(?:\s*-\s*[\$£€][\d,]+)?(?:\s*(?:per year|annual|yearly|pa|k|K))?|Competitive)/i);
+                                if (salaryMatch) {
+                                    salary = salaryMatch[1].trim();
                                 }
                             }
                         });
+                        
                         data.date_posted = date_posted;
+                        data.job_type = job_type;
+                        data.salary = salary;
+                        data.job_id = job_id;
 
                         const item = {
+                            job_id: data.job_id || null,
                             title: data.title || null,
                             company: data.company || null,
                             category: category || null,
                             location: data.location || null,
+                            job_type: data.job_type || null,
+                            salary: data.salary || null,
                             date_posted: data.date_posted || null,
                             description_html: data.description_html || null,
                             description_text: data.description_text || null,
