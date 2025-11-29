@@ -198,53 +198,78 @@ async function main() {
                     try {
                         const data = {};
                         
-                        // Extract job title from h1
-                        data.title = $('h1').first().text().trim() || null;
+                        // Extract job title - multiple strategies
+                        data.title = $('h1').first().text().trim() || 
+                                   $('efc-job-header-description h1').first().text().trim() ||
+                                   $('[data-gtm-category="job-header"] h1').first().text().trim() ||
+                                   $('title').text().split('|')[0].trim() ||
+                                   null;
                         
-                        // Extract company and location - they appear after h1 in the format "Company Location"
-                        // Look for text immediately after the h1
-                        const headerSection = $('h1').parent();
+                        // Extract company and location - multiple strategies
                         let companyLocationText = '';
                         
-                        // Try to find company and location in various possible locations
-                        headerSection.find('p, div').each((_, el) => {
+                        // Strategy 1: Look in header section spans
+                        $('efc-job-header-description span').each((_, el) => {
                             const text = $(el).text().trim();
-                            if (text && text.length < 200 && !companyLocationText) {
+                            if (text && text.length > 5 && text.length < 150 && !text.includes('Apply') && !companyLocationText) {
                                 companyLocationText = text;
                             }
                         });
                         
+                        // Strategy 2: Look in h1 parent
                         if (!companyLocationText) {
-                            // Fallback: look for text nodes near h1
-                            companyLocationText = headerSection.text().replace(data.title || '', '').trim();
+                            const headerSection = $('h1').parent();
+                            headerSection.find('span, p, div').each((_, el) => {
+                                const text = $(el).text().trim();
+                                if (text && text.length > 5 && text.length < 150 && !text.includes('Apply') && !companyLocationText) {
+                                    companyLocationText = text;
+                                }
+                            });
                         }
                         
-                        // Parse company and location from format "CompanyName Location, Country"
+                        // Strategy 3: Look for any text after h1
+                        if (!companyLocationText) {
+                            const headerSection = $('h1').parent();
+                            const allText = headerSection.text().replace(data.title || '', '').trim();
+                            const lines = allText.split('\n').filter(l => l.trim().length > 5 && l.trim().length < 150);
+                            if (lines.length > 0) {
+                                companyLocationText = lines[0].trim();
+                            }
+                        }
+                        
+                        // Parse company and location
                         if (companyLocationText) {
-                            // Common patterns: "Company City, Country" or "Company City, State"
-                            const parts = companyLocationText.split(/\s+/);
-                            if (parts.length >= 2) {
-                                // Last 2-3 parts are likely location
-                                const locationParts = [];
-                                for (let i = parts.length - 1; i >= 0 && locationParts.length < 3; i--) {
-                                    if (parts[i].match(/^[A-Z][a-z]+,?$/) || parts[i].match(/^[A-Z]{2,}$/)) {
-                                        locationParts.unshift(parts[i].replace(/,$/, ''));
-                                    } else if (locationParts.length > 0) {
-                                        break;
+                            // Pattern 1: "Company City, Country" or "Company City, State"
+                            const commaMatch = companyLocationText.match(/^(.+?)\s+([A-Za-z\s]+,\s*[A-Za-z\s]+)$/);
+                            if (commaMatch) {
+                                data.company = commaMatch[1].trim();
+                                data.location = commaMatch[2].trim();
+                            } else {
+                                // Pattern 2: Split by spaces, last 2-3 words are location
+                                const parts = companyLocationText.split(/\s+/);
+                                if (parts.length >= 3) {
+                                    // Check if last parts look like location (capitalized words)
+                                    const lastThree = parts.slice(-3).join(' ');
+                                    const lastTwo = parts.slice(-2).join(' ');
+                                    
+                                    if (lastThree.match(/^[A-Z][a-z]+.*[A-Z][a-z]+/)) {
+                                        data.location = lastThree;
+                                        data.company = parts.slice(0, -3).join(' ').trim();
+                                    } else if (lastTwo.match(/^[A-Z][a-z]+.*[A-Z][a-z]+/)) {
+                                        data.location = lastTwo;
+                                        data.company = parts.slice(0, -2).join(' ').trim();
+                                    } else {
+                                        data.company = companyLocationText;
+                                        data.location = null;
                                     }
-                                }
-                                
-                                if (locationParts.length > 0) {
-                                    data.location = locationParts.join(', ');
-                                    data.company = parts.slice(0, parts.length - locationParts.length).join(' ').trim();
                                 } else {
                                     data.company = companyLocationText;
                                     data.location = null;
                                 }
-                            } else {
-                                data.company = companyLocationText;
-                                data.location = null;
                             }
+                        } else {
+                            data.company = null;
+                            data.location = null;
                         }
                         
                         // Extract job description - multiple strategies
@@ -304,6 +329,22 @@ async function main() {
                         // Clean the extracted HTML
                         if (description_html) {
                             description_html = cleanDescriptionHtml(description_html);
+                        }
+                        
+                        // Final fallback: if still no description, get all paragraphs
+                        if (!description_html) {
+                            const paragraphs = [];
+                            $('p, ul, ol').each((_, el) => {
+                                const text = $(el).text().trim();
+                                if (text.length > 50 && !text.match(/recommended jobs|boost your career|sign in|apply now/i)) {
+                                    paragraphs.push($(el));
+                                }
+                            });
+                            
+                            if (paragraphs.length > 3) {
+                                const combined = paragraphs.map(p => p.prop('outerHTML')).join('\n');
+                                description_html = cleanDescriptionHtml(combined);
+                            }
                         }
                         
                         data.description_html = description_html;
@@ -395,6 +436,17 @@ async function main() {
                             url: request.url,
                         };
 
+                        // Log missing fields for debugging
+                        const missingFields = [];
+                        if (!item.title) missingFields.push('title');
+                        if (!item.company) missingFields.push('company');
+                        if (!item.location) missingFields.push('location');
+                        if (!item.description_html) missingFields.push('description');
+                        
+                        if (missingFields.length > 0) {
+                            crawlerLog.warning(`Job #${saved + 1} missing fields: ${missingFields.join(', ')} - ${request.url}`);
+                        }
+                        
                         await Dataset.pushData(item);
                         saved++;
                         crawlerLog.info(`Saved job #${saved}: ${data.title || 'Unknown'} at ${data.company || 'Unknown'}`);
