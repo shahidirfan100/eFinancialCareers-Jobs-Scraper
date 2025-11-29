@@ -321,34 +321,60 @@ async function main() {
                             job_id = urlMatch[1];
                         }
                         
-                        // Look for date posted
-                        $('*').each((_, el) => {
-                            const text = $(el).text().trim();
+                        // Look for date posted, job type, and salary in efc-job-meta first
+                        const jobMeta = $('efc-job-meta').text().trim();
+                        
+                        if (jobMeta) {
+                            // Extract date from meta (e.g., "Posted 5 days ago")
+                            const dateMatch = jobMeta.match(/Posted\s+(\d+\s+(?:hour|day|week|month)s?\s+ago)/i) ||
+                                            jobMeta.match(/(\d+\s+(?:hour|day|week|month)s?\s+ago)/i);
+                            if (dateMatch) {
+                                date_posted = dateMatch[1];
+                            }
                             
-                            // Check for date patterns
-                            if (!date_posted && (text.includes('Posted') || text.includes('ago'))) {
-                                const match = text.match(/Posted\s+(.+?)(?:ago|$)/i) || 
-                                             text.match(/(\d+\s+(?:hour|day|week|month)s?\s+ago)/i) ||
-                                             text.match(/Posted\s+(\d+\s+(?:hour|day|week|month)s?)/i);
-                                if (match) {
-                                    date_posted = match[1].trim();
-                                    if (!date_posted.includes('ago')) date_posted += ' ago';
+                            // Extract job type from meta
+                            const typeMatch = jobMeta.match(/\b(Permanent|Contract|Full time|Part time|Temporary|Freelance|Internship)\b/i);
+                            if (typeMatch) {
+                                job_type = typeMatch[1];
+                            }
+                            
+                            // Extract salary from meta
+                            const salaryMatch = jobMeta.match(/([\$£€][\d,]+(?:\s*-\s*[\$£€][\d,]+)?(?:\s*k|K)?|Competitive)/i);
+                            if (salaryMatch) {
+                                salary = salaryMatch[1];
+                            }
+                        }
+                        
+                        // Fallback: search in all elements if not found in meta
+                        if (!date_posted || !job_type || !salary) {
+                            $('*').each((_, el) => {
+                                const text = $(el).text().trim();
+                                
+                                // Only process short text elements to avoid garbage
+                                if (text.length > 100) return;
+                                
+                                // Check for date patterns
+                                if (!date_posted && text.match(/\d+\s+(?:hour|day|week|month)s?\s+ago/i)) {
+                                    const match = text.match(/(\d+\s+(?:hour|day|week|month)s?\s+ago)/i);
+                                    if (match) {
+                                        date_posted = match[1];
+                                    }
                                 }
-                            }
-                            
-                            // Check for job type (Permanent, Contract, Full time, Part time, etc.)
-                            if (!job_type && text.match(/^(Permanent|Contract|Full time|Part time|Temporary|Freelance|Internship)$/i)) {
-                                job_type = text;
-                            }
-                            
-                            // Check for salary patterns
-                            if (!salary && text.match(/\$[\d,]+|£[\d,]+|€[\d,]+|Competitive/i)) {
-                                const salaryMatch = text.match(/([\$£€][\d,]+(?:\s*-\s*[\$£€][\d,]+)?(?:\s*(?:per year|annual|yearly|pa|k|K))?|Competitive)/i);
-                                if (salaryMatch) {
-                                    salary = salaryMatch[1].trim();
+                                
+                                // Check for job type
+                                if (!job_type && text.match(/^(Permanent|Contract|Full time|Part time|Temporary|Freelance|Internship)$/i)) {
+                                    job_type = text;
                                 }
-                            }
-                        });
+                                
+                                // Check for salary patterns
+                                if (!salary && text.match(/[\$£€][\d,]+|Competitive/i)) {
+                                    const salaryMatch = text.match(/([\$£€][\d,]+(?:\s*-\s*[\$£€][\d,]+)?(?:\s*k|K)?|Competitive)/i);
+                                    if (salaryMatch) {
+                                        salary = salaryMatch[1];
+                                    }
+                                }
+                            });
+                        }
                         
                         data.date_posted = date_posted;
                         data.job_type = job_type;
