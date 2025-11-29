@@ -42,24 +42,42 @@ async function main() {
         const cleanDescriptionHtml = (html) => {
             if (!html) return null;
             const $ = cheerioLoad(`<div>${html}</div>`);
+            
+            // Remove all custom Angular/web components
+            $('*').each((_, el) => {
+                const tagName = el.name || '';
+                if (tagName.includes('-') || tagName.startsWith('efc')) {
+                    // Keep the content but remove the tag
+                    $(el).replaceWith($(el).html() || '');
+                }
+            });
+            
             // Remove unwanted elements
-            $('script, style, noscript, iframe, svg, img, button, form, input, select, textarea, nav, header, footer, aside, efc-apply-button, efc-saved-job, efc-icon, efc-job-buttons-container, a[role="button"]').remove();
-            // Remove all Angular custom elements that aren't content-related
-            $('efc-recruiter-info, efc-about-company, efc-company-jobs, efc-job-details-sidebar, efc-call-to-action, efc-recommended-jobs, efc-matching-jobs').remove();
-            // Remove all attributes including Angular ones
+            $('script, style, noscript, iframe, svg, img, button, form, input, select, textarea, nav, header, footer, aside, a[role="button"]').remove();
+            
+            // Remove all attributes
             $('*').each((_, el) => {
                 const attrs = Object.keys(el.attribs || {});
                 attrs.forEach(attr => {
                     $(el).removeAttr(attr);
                 });
             });
+            
             // Get cleaned HTML
             let cleaned = $.html();
-            // Remove the wrapper div we added
+            
+            // Remove the wrapper div
             cleaned = cleaned.replace(/^<div>|<\/div>$/g, '');
-            // Clean up empty tags
-            cleaned = cleaned.replace(/<(\w+)>\s*<\/\1>/g, '');
-            return cleaned.trim() || null;
+            
+            // Clean up empty tags (multiple passes)
+            for (let i = 0; i < 3; i++) {
+                cleaned = cleaned.replace(/<(\w+)>\s*<\/\1>/g, '');
+            }
+            
+            // Remove excessive whitespace
+            cleaned = cleaned.replace(/\s+/g, ' ').trim();
+            
+            return cleaned || null;
         };
 
         const buildStartUrl = (kw, loc, cat) => {
@@ -100,20 +118,19 @@ async function main() {
 
         const crawler = new CheerioCrawler({
             proxyConfiguration: proxyConf,
-            maxRequestRetries: 5,
+            maxRequestRetries: 3,
             useSessionPool: true,
             persistCookiesPerSession: true,
-            maxConcurrency: 2,
-            minConcurrency: 1,
-            requestHandlerTimeoutSecs: 120,
-            navigationTimeoutSecs: 90,
-            maxRequestsPerMinute: 20,
-            // Session rotation for better stealth
+            maxConcurrency: 10,
+            minConcurrency: 5,
+            requestHandlerTimeoutSecs: 60,
+            navigationTimeoutSecs: 45,
+            // Session rotation
             sessionPoolOptions: {
-                maxPoolSize: 20,
+                maxPoolSize: 50,
                 sessionOptions: {
-                    maxUsageCount: 10,
-                    maxErrorScore: 3,
+                    maxUsageCount: 50,
+                    maxErrorScore: 5,
                 },
             },
             // Add realistic headers
@@ -134,23 +151,11 @@ async function main() {
                     'Sec-Fetch-Mode': 'navigate',
                     'Sec-Fetch-Site': 'none',
                     'Sec-Fetch-User': '?1',
-                    'DNT': '1',
                 };
             }],
             async requestHandler({ request, $, enqueueLinks, log: crawlerLog, crawler: crawlerInstance }) {
                 const label = request.userData?.label || 'LIST';
                 const pageNo = request.userData?.pageNo || 1;
-
-                // Human-like delays with exponential backoff
-                const baseDelay = label === 'LIST' ? 3000 : 5000; // Longer delay for detail pages
-                const jitter = Math.random() * 2000;
-                const retryMultiplier = (request.retryCount || 0) * 2000; // Add delay on retries
-                await new Promise(resolve => setTimeout(resolve, baseDelay + jitter + retryMultiplier));
-                
-                // Simulate human reading time on detail pages
-                if (label === 'DETAIL') {
-                    await new Promise(resolve => setTimeout(resolve, 2000 + Math.random() * 3000));
-                }
 
                 if (label === 'LIST') {
                     const links = findJobLinks($, request.url);
@@ -242,40 +247,61 @@ async function main() {
                             }
                         }
                         
-                        // Extract job description - target specific eFinancialCareers structure
+                        // Extract job description - multiple strategies
                         let description_html = null;
                         
-                        // Target the efc-job-description component specifically
-                        const jobDescElem = $('efc-job-description div[_ngcontent-ng-c3589833976]').first();
-                        
-                        if (jobDescElem.length > 0) {
+                        // Strategy 1: Target efc-job-description with any Angular attribute
+                        let jobDescElem = $('efc-job-description').find('div').first();
+                        if (jobDescElem.length > 0 && jobDescElem.text().length > 200) {
                             description_html = jobDescElem.html();
-                        } else {
-                            // Fallback: look for content with job-related keywords
-                            const possibleDescriptions = [];
+                        }
+                        
+                        // Strategy 2: Look for divs inside efc-job-description
+                        if (!description_html) {
+                            $('efc-job-description div').each((_, el) => {
+                                const text = $(el).text();
+                                if (text.length > 300 && text.match(/responsibilities|requirements|qualifications/i)) {
+                                    description_html = $(el).html();
+                                    return false;
+                                }
+                            });
+                        }
+                        
+                        // Strategy 3: Find the largest text block with job keywords
+                        if (!description_html) {
+                            let maxScore = 0;
+                            let bestElem = null;
+                            
                             $('div').each((_, el) => {
                                 const elem = $(el);
                                 const text = elem.text();
                                 const html = elem.html();
-                                const children = elem.children().length;
                                 
-                                // Look for elements with substantial content but not too many nested elements
-                                if (text.length > 300 && text.length < 20000 && html && html.length > 400 && children < 50) {
-                                    if (text.match(/responsibilities|requirements|qualifications|experience|skills|benefits|description/i)) {
-                                        // Exclude navigation, headers, sidebars
-                                        if (!text.match(/recommended jobs|boost your career|sign in|apply now/i)) {
-                                            possibleDescriptions.push({ text, html, score: text.length });
+                                if (text.length > 300 && text.length < 15000 && html) {
+                                    // Check if contains job description keywords
+                                    const hasKeywords = text.match(/responsibilities|requirements|qualifications|experience|skills/i);
+                                    // Exclude unwanted sections
+                                    const isUnwanted = text.match(/recommended jobs|boost your career|sign in|apply now|more jobs|matching jobs/i);
+                                    
+                                    if (hasKeywords && !isUnwanted) {
+                                        // Score based on length and keyword density
+                                        const keywordCount = (text.match(/responsibilities|requirements|qualifications|experience|skills|benefits/gi) || []).length;
+                                        const score = text.length + (keywordCount * 100);
+                                        
+                                        if (score > maxScore) {
+                                            maxScore = score;
+                                            bestElem = elem;
                                         }
                                     }
                                 }
                             });
                             
-                            if (possibleDescriptions.length > 0) {
-                                possibleDescriptions.sort((a, b) => b.score - a.score);
-                                description_html = possibleDescriptions[0].html;
+                            if (bestElem) {
+                                description_html = bestElem.html();
                             }
                         }
                         
+                        // Clean the extracted HTML
                         if (description_html) {
                             description_html = cleanDescriptionHtml(description_html);
                         }
