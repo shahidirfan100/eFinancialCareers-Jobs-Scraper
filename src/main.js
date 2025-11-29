@@ -2,6 +2,17 @@
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
+import { HeaderGenerator } from 'header-generator';
+
+const headerGenerator = new HeaderGenerator({
+    browsers: [
+        { name: 'chrome', minVersion: 120, maxVersion: 131 },
+        { name: 'edge', minVersion: 120, maxVersion: 131 },
+    ],
+    devices: ['desktop'],
+    operatingSystems: ['windows', 'macos'],
+    locales: ['en-US', 'en-GB'],
+});
 
 // Single-entrypoint main
 await Actor.init();
@@ -32,15 +43,22 @@ async function main() {
             if (!html) return null;
             const $ = cheerioLoad(`<div>${html}</div>`);
             // Remove unwanted elements
-            $('script, style, noscript, iframe, svg, img, button, form, input, select, textarea, nav, header, footer, aside').remove();
-            // Remove class and style attributes but keep text-formatting tags
+            $('script, style, noscript, iframe, svg, img, button, form, input, select, textarea, nav, header, footer, aside, efc-apply-button, efc-saved-job, efc-icon, efc-job-buttons-container, a[role="button"]').remove();
+            // Remove all Angular custom elements that aren't content-related
+            $('efc-recruiter-info, efc-about-company, efc-company-jobs, efc-job-details-sidebar, efc-call-to-action, efc-recommended-jobs, efc-matching-jobs').remove();
+            // Remove all attributes including Angular ones
             $('*').each((_, el) => {
-                $(el).removeAttr('class').removeAttr('style').removeAttr('id').removeAttr('data-*');
+                const attrs = Object.keys(el.attribs || {});
+                attrs.forEach(attr => {
+                    $(el).removeAttr(attr);
+                });
             });
             // Get cleaned HTML
             let cleaned = $.html();
             // Remove the wrapper div we added
             cleaned = cleaned.replace(/^<div>|<\/div>$/g, '');
+            // Clean up empty tags
+            cleaned = cleaned.replace(/<(\w+)>\s*<\/\1>/g, '');
             return cleaned.trim() || null;
         };
 
@@ -82,20 +100,57 @@ async function main() {
 
         const crawler = new CheerioCrawler({
             proxyConfiguration: proxyConf,
-            maxRequestRetries: 3,
+            maxRequestRetries: 5,
             useSessionPool: true,
             persistCookiesPerSession: true,
-            maxConcurrency: 5,
-            requestHandlerTimeoutSecs: 90,
-            navigationTimeoutSecs: 60,
-            // Add delays to appear more human-like
+            maxConcurrency: 2,
             minConcurrency: 1,
+            requestHandlerTimeoutSecs: 120,
+            navigationTimeoutSecs: 90,
+            maxRequestsPerMinute: 20,
+            // Session rotation for better stealth
+            sessionPoolOptions: {
+                maxPoolSize: 20,
+                sessionOptions: {
+                    maxUsageCount: 10,
+                    maxErrorScore: 3,
+                },
+            },
+            // Add realistic headers
+            preNavigationHooks: [async ({ request, session }, gotoOptions) => {
+                const headers = headerGenerator.getHeaders({
+                    operatingSystem: 'windows',
+                    browser: 'chrome',
+                });
+                
+                request.headers = {
+                    ...headers,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Cache-Control': 'max-age=0',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'DNT': '1',
+                };
+            }],
             async requestHandler({ request, $, enqueueLinks, log: crawlerLog, crawler: crawlerInstance }) {
                 const label = request.userData?.label || 'LIST';
                 const pageNo = request.userData?.pageNo || 1;
 
-                // Random delay between requests (1-3 seconds)
-                await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
+                // Human-like delays with exponential backoff
+                const baseDelay = label === 'LIST' ? 3000 : 5000; // Longer delay for detail pages
+                const jitter = Math.random() * 2000;
+                const retryMultiplier = (request.retryCount || 0) * 2000; // Add delay on retries
+                await new Promise(resolve => setTimeout(resolve, baseDelay + jitter + retryMultiplier));
+                
+                // Simulate human reading time on detail pages
+                if (label === 'DETAIL') {
+                    await new Promise(resolve => setTimeout(resolve, 2000 + Math.random() * 3000));
+                }
 
                 if (label === 'LIST') {
                     const links = findJobLinks($, request.url);
@@ -187,30 +242,42 @@ async function main() {
                             }
                         }
                         
-                        // Extract job description - find the main content area
+                        // Extract job description - target specific eFinancialCareers structure
                         let description_html = null;
                         
-                        // Try to find description by looking for large text blocks
-                        const possibleDescriptions = [];
+                        // Target the efc-job-description component specifically
+                        const jobDescElem = $('efc-job-description div[_ngcontent-ng-c3589833976]').first();
                         
-                        $('div, section, article').each((_, el) => {
-                            const elem = $(el);
-                            const text = elem.text();
-                            const html = elem.html();
-                            
-                            // Look for elements with substantial content
-                            if (text.length > 300 && html && html.length > 400) {
-                                // Check if it contains job-related keywords
-                                if (text.match(/responsibilities|requirements|qualifications|experience|skills|benefits|description/i)) {
-                                    possibleDescriptions.push({ text, html, score: text.length });
+                        if (jobDescElem.length > 0) {
+                            description_html = jobDescElem.html();
+                        } else {
+                            // Fallback: look for content with job-related keywords
+                            const possibleDescriptions = [];
+                            $('div').each((_, el) => {
+                                const elem = $(el);
+                                const text = elem.text();
+                                const html = elem.html();
+                                const children = elem.children().length;
+                                
+                                // Look for elements with substantial content but not too many nested elements
+                                if (text.length > 300 && text.length < 20000 && html && html.length > 400 && children < 50) {
+                                    if (text.match(/responsibilities|requirements|qualifications|experience|skills|benefits|description/i)) {
+                                        // Exclude navigation, headers, sidebars
+                                        if (!text.match(/recommended jobs|boost your career|sign in|apply now/i)) {
+                                            possibleDescriptions.push({ text, html, score: text.length });
+                                        }
+                                    }
                                 }
+                            });
+                            
+                            if (possibleDescriptions.length > 0) {
+                                possibleDescriptions.sort((a, b) => b.score - a.score);
+                                description_html = possibleDescriptions[0].html;
                             }
-                        });
+                        }
                         
-                        if (possibleDescriptions.length > 0) {
-                            // Get the longest description
-                            possibleDescriptions.sort((a, b) => b.score - a.score);
-                            description_html = cleanDescriptionHtml(possibleDescriptions[0].html);
+                        if (description_html) {
+                            description_html = cleanDescriptionHtml(description_html);
                         }
                         
                         data.description_html = description_html;
